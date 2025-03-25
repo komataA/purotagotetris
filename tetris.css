@@ -1,0 +1,422 @@
+using System.Collections;
+using System.Collections.Generic;
+using UnityEngine;
+using UnityEngine.Tilemaps;
+using TMPro;
+
+public class Tetris : MonoBehaviour
+{
+    public GameObject mainCamera;
+    public GameObject tileObj;
+    public TileBase[] tileChip;
+    public GameObject objNextBlocks;
+    public float dropInterval;
+    public float deleteInterval;
+
+    private Tilemap tilemap;
+    private Tilemap nextTilemap;
+    private Vector2Int fSize;
+    private TileData[,] tileData;
+    private TileData[,] nextTileData;
+    private DropTiles dropTiles;
+    private IEnumerator DropCoroutine;
+
+    private int rndBlock = 0;
+    private int nextBlock = 0;
+
+    public enum GAME_MODE { PLAY, WAIT, GAMEOVER }
+    public GAME_MODE gameMode;
+
+    public TextMeshProUGUI txtScore;
+
+    private static readonly Vector3Int[] moveDirs = {
+        new Vector3Int(1, 0, 0),
+        new Vector3Int(0, -1, 0),
+        new Vector3Int(-1, 0, 0),
+        new Vector3Int(0, 1, 0)
+    };
+
+    void Start() { }
+
+    public void IntervalChange(float speed)
+    {
+        dropInterval = speed;
+        deleteInterval = Mathf.Max(speed / 1.5f, 0.5f);
+    }
+
+    public void Tetris_Setup(Vector2Int siz)
+    {
+        tilemap = tileObj.GetComponent<Tilemap>();
+        nextTilemap = objNextBlocks.GetComponent<Tilemap>();
+        tilemap.ClearAllTiles();
+
+        fSize = siz;
+        tileData = new TileData[fSize.x, fSize.y];
+        nextTileData = new TileData[fSize.x, fSize.y];
+        dropTiles = new DropTiles();
+        gameMode = GAME_MODE.WAIT;
+
+        SetWall();
+        Camera_Setup();
+        ViewTiles();
+    }
+
+    public void GameStart()
+    {
+        gameMode = GAME_MODE.PLAY;
+        rndBlock = Random.Range(1, 8);
+        Generate_DropBlock();
+        DropCoroutine = Cor_DropBlocks();
+        StartCoroutine(DropCoroutine);
+        ViewTiles();
+    }
+
+    IEnumerator Cor_DropBlocks()
+    {
+        var gm = GetComponent<GameManager>();
+        yield return new WaitForSeconds(dropInterval);
+
+        while (true)
+        {
+            if (Check_CanMove(Vector3Int.down))
+                Move_DropBlocks(Vector3Int.down);
+            else
+            {
+                foreach (var pos in dropTiles.setPos)
+                    tileData[pos.x, pos.y].blockType = TileType.BLOCK;
+
+                gameMode = GAME_MODE.WAIT;
+                var delCol = CheckDeleteTiles();
+
+                if (delCol.Count > 0)
+                {
+                    DeleteTiles(delCol);
+                    ViewTiles();
+                    gm.Score_Update(delCol.Count);
+                    UpdateScore(gm.nowScore);
+                    yield return new WaitForSeconds(deleteInterval);
+
+                    SortTiles(delCol);
+                    ViewTiles();
+                    yield return new WaitForSeconds(deleteInterval);
+                }
+
+                Generate_DropBlock();
+                gameMode = GAME_MODE.PLAY;
+            }
+
+            ViewTiles();
+            yield return new WaitForSeconds(dropInterval);
+        }
+    }
+
+    void DeleteTiles(List<int> del)
+    {
+        foreach (int y in del)
+            for (int x = 1; x < fSize.x - 1; x++)
+                tileData[x, y].DataReset();
+    }
+
+    void SortTiles(List<int> del)
+    {
+        for (int y = 1; y < fSize.y - 1; y++)
+        {
+            int sortCount = del.FindAll(d => d < y).Count;
+            for (int x = 1; x < fSize.x - 1; x++)
+                if (tileData[x, y].blockType == TileType.BLOCK)
+                    nextTileData[x, y - sortCount] = tileData[x, y].Clone();
+        }
+
+        for (int y = 1; y < fSize.y - 1; y++)
+        {
+            for (int x = 1; x < fSize.x - 1; x++)
+            {
+                tileData[x, y] = nextTileData[x, y].Clone();
+                nextTileData[x, y].DataReset();
+            }
+        }
+    }
+
+    List<int> CheckDeleteTiles()
+    {
+        List<int> deleteLine = new List<int>();
+        for (int y = 1; y < fSize.y - 1; y++)
+        {
+            bool full = true;
+            for (int x = 1; x < fSize.x - 1; x++)
+                if (tileData[x, y].blockType == TileType.NULL) full = false;
+            if (full) deleteLine.Add(y);
+        }
+        return deleteLine;
+    }
+
+    void Generate_DropBlock()
+    {
+        Vector3Int center = new Vector3Int(fSize.x / 2, fSize.y - 3, 0);
+        nextBlock = rndBlock;
+        rndBlock = Random.Range(1, 8);
+
+        nextTilemap.ClearAllTiles();
+        foreach (var pos in TileCalculation.blockList(rndBlock, 0))
+            nextTilemap.SetTile(pos, GetSafeTile(rndBlock));
+
+        dropTiles.SetDropData(center, nextBlock, 0);
+        bool isGameover = false;
+
+        foreach (var pos in dropTiles.setPos)
+        {
+            if (tileData[pos.x, pos.y].blockType == TileType.BLOCK)
+                isGameover = true;
+
+            tileData[pos.x, pos.y].blockType = TileType.DROP;
+            tileData[pos.x, pos.y].tileColor = nextBlock;
+        }
+
+        if (isGameover) Process_Gameover();
+    }
+
+    void Process_Gameover()
+    {
+        gameMode = GAME_MODE.GAMEOVER;
+        StopCoroutine(DropCoroutine);
+        ViewTiles();
+        StartCoroutine(Cor_BlockGray());
+    }
+
+    IEnumerator Cor_BlockGray()
+    {
+        var gm = GetComponent<GameManager>();
+        yield return new WaitForSeconds(0.5f);
+
+        for (int y = 1; y < fSize.y - 1; y++)
+        {
+            for (int x = 1; x < fSize.x - 1; x++)
+                if (tileData[x, y].blockType != TileType.NULL)
+                    tileData[x, y].tileColor = 9;
+
+            ViewTiles();
+            yield return new WaitForSeconds(0.1f);
+        }
+
+        yield return new WaitForSeconds(0.5f);
+        gm.panelGameover.SetActive(true);
+    }
+
+    public void PushMoveButton(int num)
+    {
+        if (gameMode == GAME_MODE.PLAY && Check_CanMove(moveDirs[num]))
+        {
+            Move_DropBlocks(moveDirs[num]);
+            ViewTiles();
+        }
+    }
+
+    bool Check_CanMove(Vector3Int moveVec)
+    {
+        foreach (var pos in dropTiles.setPos)
+        {
+            var checkPos = pos + moveVec;
+            var type = tileData[checkPos.x, checkPos.y].blockType;
+            if (type == TileType.WALL || type == TileType.BLOCK)
+                return false;
+        }
+        return true;
+    }
+
+    void Move_DropBlocks(Vector3Int moveVec)
+    {
+        foreach (var pos in dropTiles.setPos)
+            tileData[pos.x, pos.y].blockType = TileType.NULL;
+
+        dropTiles.MoveCenter(moveVec);
+
+        foreach (var pos in dropTiles.setPos)
+        {
+            tileData[pos.x, pos.y].blockType = TileType.DROP;
+            tileData[pos.x, pos.y].tileColor = dropTiles.shapeNum;
+        }
+    }
+
+    public void Push_RotationButton(int rotDirection)
+    {
+        int rot = (dropTiles.rotNum + rotDirection) % 4;
+        if (dropTiles.shapeNum == 2) rot = 0;
+        else if (dropTiles.shapeNum == 4 || dropTiles.shapeNum == 5 || dropTiles.shapeNum == 7) rot %= 2;
+
+        var testList = TileCalculation.blockList(dropTiles.shapeNum, rot);
+        var posList = testList.ConvertAll(p => p + dropTiles.centerPos);
+
+        if (Check_CanRotate(posList))
+        {
+            foreach (var pos in dropTiles.setPos)
+                tileData[pos.x, pos.y].DataReset();
+
+            dropTiles.SetDropData(dropTiles.centerPos, dropTiles.shapeNum, rot);
+            foreach (var pos in dropTiles.setPos)
+            {
+                tileData[pos.x, pos.y].blockType = TileType.DROP;
+                tileData[pos.x, pos.y].tileColor = dropTiles.shapeNum;
+            }
+            ViewTiles();
+        }
+    }
+
+    bool Check_CanRotate(List<Vector3Int> posList)
+    {
+        foreach (var pos in posList)
+        {
+            if (pos.x < 0 || pos.y < 0 || pos.x >= fSize.x || pos.y >= fSize.y)
+                return false;
+
+            var type = tileData[pos.x, pos.y].blockType;
+            if (type == TileType.WALL || type == TileType.BLOCK)
+                return false;
+        }
+        return true;
+    }
+
+    void SetWall()
+    {
+        for (int y = 0; y < fSize.y; y++)
+        {
+            for (int x = 0; x < fSize.x; x++)
+            {
+                tileData[x, y] = new TileData();
+                nextTileData[x, y] = new TileData();
+                tileData[x, y].DataReset();
+                nextTileData[x, y].DataReset();
+                if (x == 0 || y == 0 || x == fSize.x - 1 || y == fSize.y - 1)
+                    tileData[x, y].blockType = TileType.WALL;
+            }
+        }
+    }
+
+    void ViewTiles()
+    {
+        for (int y = 0; y < fSize.y; y++)
+        {
+            for (int x = 0; x < fSize.x; x++)
+            {
+                var pos = new Vector3Int(x, y, 0);
+                var color = tileData[x, y].tileColor;
+                tilemap.SetTile(pos, tileData[x, y].blockType == TileType.NULL ? null : GetSafeTile(color));
+            }
+        }
+    }
+
+    TileBase GetSafeTile(int index)
+    {
+        return (index >= 0 && index < tileChip.Length) ? tileChip[index] : null;
+    }
+
+    void Camera_Setup()
+    {
+        var cam = mainCamera.GetComponent<Camera>();
+        cam.orthographicSize = fSize.y / 2 + 1;
+        var center = (tilemap.GetCellCenterWorld(Vector3Int.zero) + tilemap.GetCellCenterWorld(new Vector3Int(fSize.x - 1, fSize.y - 1, 0))) / 2;
+        mainCamera.transform.position = new Vector3(center.x, center.y, -10);
+
+        objNextBlocks.transform.position = tilemap.GetCellCenterWorld(new Vector3Int(fSize.x + 1, fSize.y - 2, 0));
+        objNextBlocks.transform.localScale = new Vector3(0.5f, 0.5f, 1);
+    }
+
+    void UpdateScore(int score)
+    {
+        if (txtScore != null)
+            txtScore.text = "Score: " + score;
+    }
+}
+
+public enum TileType { NULL, WALL, BLOCK, DROP }
+
+public class TileData
+{
+    public TileType blockType;
+    public int tileColor;
+    public void DataReset() { blockType = TileType.NULL; tileColor = 0; }
+    public TileData Clone() => (TileData)MemberwiseClone();
+}
+
+public class DropTiles
+{
+    public Vector3Int centerPos;
+    public int shapeNum;
+    public int rotNum;
+    public List<Vector3Int> setPos = new List<Vector3Int>();
+
+    public void SetDropData(Vector3Int center, int type, int rot)
+    {
+        centerPos = center;
+        shapeNum = type;
+        rotNum = rot;
+        setPos = TileCalculation.blockList(type, rot).ConvertAll(p => p + center);
+    }
+
+    public void MoveCenter(Vector3Int moveVec) => SetDropData(centerPos + moveVec, shapeNum, rotNum);
+}
+
+public static class TileCalculation
+{
+    public static List<Vector3Int> blockList(int shapeNum, int rotNum)
+    {
+        List<Vector3Int> pos = new List<Vector3Int>();
+        switch (shapeNum)
+        {
+            case 1: pos.AddRange(new[] {
+                new Vector3Int(-1, 1, 0),
+                new Vector3Int(-1, 0, 0),
+                new Vector3Int(0, 0, 0),
+                new Vector3Int(1, 0, 0)}); break;
+            case 2: pos.AddRange(new[] {
+                new Vector3Int(1, 1, 0),
+                new Vector3Int(1, 0, 0),
+                new Vector3Int(0, 1, 0),
+                new Vector3Int(0, 0, 0)}); break;
+            case 3: pos.AddRange(new[] {
+                new Vector3Int(-1, 0, 0),
+                new Vector3Int(0, 0, 0),
+                new Vector3Int(1, 0, 0),
+                new Vector3Int(1, 1, 0)}); break;
+            case 4: pos.AddRange(new[] {
+                new Vector3Int(-1, 1, 0),
+                new Vector3Int(-1, 0, 0),
+                new Vector3Int(0, 0, 0),
+                new Vector3Int(0, -1, 0)}); break;
+            case 5: pos.AddRange(new[] {
+                new Vector3Int(0, 1, 0),
+                new Vector3Int(0, 0, 0),
+                new Vector3Int(-1, 0, 0),
+                new Vector3Int(-1, -1, 0)}); break;
+            case 6: pos.AddRange(new[] {
+                new Vector3Int(-1, 0, 0),
+                new Vector3Int(0, 0, 0),
+                new Vector3Int(1, 0, 0),
+                new Vector3Int(0, 1, 0)}); break;
+            case 7: pos.AddRange(new[] {
+                new Vector3Int(-1, 0, 0),
+                new Vector3Int(0, 0, 0),
+                new Vector3Int(1, 0, 0),
+                new Vector3Int(2, 0, 0)}); break;
+        }
+        return rotPos(Vector3Int.zero, pos, rotNum);
+    }
+
+    public static List<Vector3Int> rotPos(Vector3Int center, List<Vector3Int> posList, int rotCount)
+    {
+        List<Vector3Int> rotList = new List<Vector3Int>();
+        rotCount %= 4;
+        foreach (var pos in posList)
+        {
+            Vector3Int checkP = pos - center;
+            Vector3Int nextP = rotCount switch
+            {
+                1 => new Vector3Int(-checkP.y, checkP.x, 0),
+                2 => new Vector3Int(-checkP.x, -checkP.y, 0),
+                3 => new Vector3Int(checkP.y, -checkP.x, 0),
+                _ => new Vector3Int(checkP.x, checkP.y, 0),
+            };
+            rotList.Add(nextP + center);
+        }
+        return rotList;
+    }
+}
